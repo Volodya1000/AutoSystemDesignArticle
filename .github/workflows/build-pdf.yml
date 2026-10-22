@@ -1,0 +1,81 @@
+name: Build article PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.tex"
+      - "*.bib"
+      - "images/**"
+      - ".github/workflows/build-pdf.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: article-pdf-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-pdf:
+    name: Compile article and publish PDF
+    runs-on: ubuntu-24.04
+    env:
+      # A fixed timestamp makes unchanged PDFs byte-identical between builds.
+      SOURCE_DATE_EPOCH: "1704067200"
+      FORCE_SOURCE_DATE: "1"
+      TZ: UTC
+    steps:
+      - name: Check out the source branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || github.ref }}
+
+      - name: Install LaTeX, Cyrillic fonts and BibTeX tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            latexmk \
+            texlive-latex-base \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            texlive-lang-cyrillic
+
+      - name: Compile article with bibliography and references
+        run: |
+          latexmk -pdf -gg -interaction=nonstopmode -halt-on-error -file-line-error main.tex
+          test -s main.pdf
+          if grep -Eq "LaTeX Warning: (Citation .* undefined|Reference .* undefined|There were undefined references)" main.log; then
+            echo "::error::Unresolved LaTeX citation or reference"
+            exit 1
+          fi
+          mv main.pdf article.pdf
+
+      - name: Upload PDF as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoSystemDesignArticle-pdf
+          path: article.pdf
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit PDF to the source branch
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f article.pdf
+          if git diff --cached --quiet; then
+            echo "article.pdf is already up to date."
+            exit 0
+          fi
+          git commit -m "docs: update compiled article PDF"
+          git push origin "HEAD:${TARGET_BRANCH}"
